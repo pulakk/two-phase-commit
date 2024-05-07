@@ -153,6 +153,7 @@ pub fn check_last_run(
         for pid in 0..num_participants {
             let participant_id_str = format!("participant_{}", pid);
             let participant_log_path = format!("{}//{}.log", log_path, participant_id_str);
+            println!("Checking {}", participant_log_path);
             let participant_oplog = OpLog::from_file(participant_log_path);
             let participant_lock = participant_oplog.arc();
             let participant_log = participant_lock.lock().unwrap();

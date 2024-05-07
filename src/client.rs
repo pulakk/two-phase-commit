@@ -6,19 +6,15 @@ extern crate ipc_channel;
 extern crate log;
 extern crate stderrlog;
 
-use std::thread;
-use std::time::Duration;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
 
 use client::ipc_channel::ipc::IpcReceiver as Receiver;
-use client::ipc_channel::ipc::TryRecvError;
 use client::ipc_channel::ipc::IpcSender as Sender;
 
 use message;
-use message::MessageType;
-use message::RequestStatus;
+
+use crate::message::ProtocolMessage;
 
 // Client state and primitives for communicating with the coordinator
 #[derive(Debug)]
@@ -26,6 +22,10 @@ pub struct Client {
     pub id_str: String,
     pub running: Arc<AtomicBool>,
     pub num_requests: u32,
+    pub tx: Sender<ProtocolMessage>,
+    pub rx: Receiver<ProtocolMessage>,
+    pub successful_ops: u32,
+    pub failed_ops: u32,
 }
 
 ///
@@ -50,12 +50,17 @@ impl Client {
     ///       the protocol is still running to this constructor
     ///
     pub fn new(id_str: String,
-               running: Arc<AtomicBool>) -> Client {
+               running: Arc<AtomicBool>,
+               tx: Sender<ProtocolMessage>,
+               rx: Receiver<ProtocolMessage>) -> Client {
         Client {
             id_str: id_str,
             running: running,
             num_requests: 0,
-            // TODO
+            tx,
+            rx,
+            successful_ops: 0,
+            failed_ops: 0,
         }
     }
 
@@ -66,7 +71,7 @@ impl Client {
     pub fn wait_for_exit_signal(&mut self) {
         trace!("{}::Waiting for exit signal", self.id_str.clone());
 
-        // TODO
+        while self.running.load(Ordering::SeqCst) {};
 
         trace!("{}::Exiting", self.id_str.clone());
     }
@@ -80,13 +85,15 @@ impl Client {
         // Create a new request with a unique TXID.
         self.num_requests = self.num_requests + 1;
         let txid = format!("{}_op_{}", self.id_str.clone(), self.num_requests);
-        let pm = message::ProtocolMessage::generate(message::MessageType::ClientRequest,
-                                                    txid.clone(),
-                                                    self.id_str.clone(),
-                                                    self.num_requests);
+        let pm = message::ProtocolMessage::generate(
+            message::MessageType::ClientRequest,
+            txid.clone(),
+            self.id_str.clone(),
+            self.num_requests
+        );
         info!("{}::Sending operation #{}", self.id_str.clone(), self.num_requests);
 
-        // TODO
+        self.tx.send(pm).unwrap();
 
         trace!("{}::Sent operation #{}", self.id_str.clone(), self.num_requests);
     }
@@ -98,10 +105,15 @@ impl Client {
     /// not fail in this simulation
     ///
     pub fn recv_result(&mut self) {
-
         info!("{}::Receiving Coordinator Result", self.id_str.clone());
-
-        // TODO
+        let result = self.rx.recv().unwrap();
+    
+        match result.mtype {
+            message::MessageType::ClientResultCommit => self.successful_ops += 1,
+            message::MessageType::ClientResultAbort => self.failed_ops += 1,
+            _ => {},
+        }
+        info!("Client {} received response: {:?}", self.id_str, result);
     }
 
     ///
@@ -111,9 +123,9 @@ impl Client {
     ///
     pub fn report_status(&mut self) {
         // TODO: Collect actual stats
-        let successful_ops: u64 = 0;
-        let failed_ops: u64 = 0;
-        let unknown_ops: u64 = 0;
+        let successful_ops = self.successful_ops;
+        let failed_ops = self.failed_ops;
+        let unknown_ops = self.num_requests - successful_ops - failed_ops;
 
         println!("{:16}:\tCommitted: {:6}\tAborted: {:6}\tUnknown: {:6}", self.id_str.clone(), successful_ops, failed_ops, unknown_ops);
     }
@@ -126,9 +138,14 @@ impl Client {
     ///       exit signal before returning from the protocol method!
     ///
     pub fn protocol(&mut self, n_requests: u32) {
+        for _ in 0..n_requests {
+            self.send_next_operation();
+            self.recv_result();
+        }
 
-        // TODO
-        self.wait_for_exit_signal();
+        info!("Client {} done.", self.id_str);
+
+        // self.wait_for_exit_signal();
         self.report_status();
     }
 }

@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use message;
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct OpLog {
     seqno: u32,
@@ -84,6 +85,10 @@ impl OpLog {
         writeln!(&mut self.lf).unwrap();
         self.lf.flush().unwrap();
         log.insert(id, pm);
+    }
+
+    pub fn append_msg_as_type(&mut self, msg: &message::ProtocolMessage, t: message::MessageType) {
+        self.append(t, msg.txid.clone(), msg.senderid.clone(), msg.opid);
     }
 
     ///

@@ -4,11 +4,14 @@ extern crate stderrlog;
 extern crate clap;
 extern crate ctrlc;
 extern crate ipc_channel;
+extern crate serde;
+extern crate nix;
 use std::env;
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::process::{Child,Command};
+use client::Client;
 use ipc_channel::ipc::IpcSender as Sender;
 use ipc_channel::ipc::IpcReceiver as Receiver;
 use ipc_channel::ipc::IpcOneShotServer;
@@ -21,6 +24,7 @@ pub mod client;
 pub mod checker;
 pub mod tpcoptions;
 use message::ProtocolMessage;
+use participant::Participant;
 
 ///
 /// pub fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (std::process::Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>)
@@ -34,16 +38,15 @@ use message::ProtocolMessage;
 ///
 /// HINT: You can change the signature of the function if necessary
 ///
-fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
+fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions, ipc_one_shot_server: IpcOneShotServer<(Sender<ProtocolMessage>, Receiver<ProtocolMessage>)>) -> (Child, Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
     let child = Command::new(env::current_exe().unwrap())
         .args(child_opts.as_vec())
         .spawn()
         .expect("Failed to execute child process");
 
-    let (tx, rx) = channel().unwrap();
-    // TODO
+    let (_, (tx_from_child, rx_to_child)) = ipc_one_shot_server.accept().unwrap();
 
-    (child, tx, rx)
+    (child, tx_from_child, rx_to_child)
 }
 
 ///
@@ -58,11 +61,24 @@ fn spawn_child_and_connect(child_opts: &mut tpcoptions::TPCOptions) -> (Child, S
 /// HINT: You can change the signature of the function if necessasry
 ///
 fn connect_to_coordinator(opts: &tpcoptions::TPCOptions) -> (Sender<ProtocolMessage>, Receiver<ProtocolMessage>) {
-    let (tx, rx) = channel().unwrap();
+    let one_shot_tx = Sender::connect(opts.ipc_path.clone()).unwrap();
 
-    // TODO
+    let (tx_from_coord, rx_from_coord) = channel::<ProtocolMessage>().unwrap();
+    let (tx_to_coord, rx_to_coord) = channel::<ProtocolMessage>().unwrap();
+    one_shot_tx.send((tx_from_coord, rx_to_coord)).unwrap();
 
-    (tx, rx)
+    (tx_to_coord, rx_from_coord)
+}
+
+pub fn run_check(mut opts: tpcoptions::TPCOptions) {
+    opts.mode = "check".to_string();
+
+    let mut child = Command::new(env::current_exe().unwrap())
+        .args(opts.as_vec())
+        .spawn()
+        .expect("Failed to execute child process");
+
+    child.wait().expect("Error in waiting for check process");
 }
 
 ///
@@ -81,8 +97,44 @@ fn connect_to_coordinator(opts: &tpcoptions::TPCOptions) -> (Sender<ProtocolMess
 ///
 fn run(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
     let coord_log_path = format!("{}//{}", opts.log_path, "coordinator.log");
+    let mut coord = coordinator::Coordinator::new(coord_log_path, &running, opts.num_requests);
 
-    // TODO
+    println!("Coord Pid = {}", std::process::id());
+
+    let mut clients = (0..opts.num_clients).map(|i| {
+        let (server, ipc_path) = IpcOneShotServer::new().unwrap();
+        let mut client_opts = opts.clone();
+        client_opts.ipc_path = ipc_path;
+        client_opts.num = i;
+        client_opts.mode = "client".to_string();
+        let (child, tx, rx) = spawn_child_and_connect(&mut client_opts, server);
+        coord.client_join(tx, rx);
+
+        child
+    }).collect::<Vec<Child>>();
+
+    let mut participants = (0..opts.num_participants).map(|i| {
+        let (server, ipc_path) = IpcOneShotServer::new().unwrap();
+        let mut participant_opts = opts.clone();
+        participant_opts.ipc_path = ipc_path;
+        participant_opts.num = i;
+        participant_opts.mode = "participant".to_string();
+        let (child, tx, rx) = spawn_child_and_connect(&mut participant_opts, server);
+        coord.participant_join(tx, rx);
+
+        child
+    }).collect::<Vec<Child>>();
+
+    coord.protocol();
+
+    for child in &mut clients {
+        child.wait().expect("Failed waiting for client");
+    }
+    for child in &mut participants {
+        child.wait().expect("Failed waiting for participant");
+    };
+
+    run_check(opts.clone());
 }
 
 ///
@@ -96,7 +148,9 @@ fn run(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
 /// 3. Starts the client protocol
 ///
 fn run_client(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
-    // TODO
+    let (tx, rx) = connect_to_coordinator(opts);
+    let mut client = Client::new(format!("client_{}", opts.num), running, tx, rx);
+    client.protocol(opts.num_requests);
 }
 
 ///
@@ -113,7 +167,19 @@ fn run_participant(opts: & tpcoptions::TPCOptions, running: Arc<AtomicBool>) {
     let participant_id_str = format!("participant_{}", opts.num);
     let participant_log_path = format!("{}//{}.log", opts.log_path, participant_id_str);
 
-    // TODO
+    let (tx, rx) = connect_to_coordinator(opts);
+    let mut participant = Participant::new(
+        participant_id_str,
+        participant_log_path,
+        running,
+        opts.send_success_probability,
+        opts.operation_success_probability,
+        tx,
+        rx,
+        opts.num_requests * opts.num_clients,
+    );
+
+    participant.protocol();
 }
 
 fn main() {

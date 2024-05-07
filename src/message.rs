@@ -90,5 +90,15 @@ impl ProtocolMessage {
         let pm: ProtocolMessage = serde_json::from_value(data).unwrap();
         pm
     }
+    pub fn own_as_type(&self, senderid: String, t: MessageType) -> ProtocolMessage {
+        let mut cloned_msg = self.as_type(t);
+        cloned_msg.senderid = senderid;
+        cloned_msg
+    }
+    pub fn as_type(&self, t: MessageType) -> ProtocolMessage {
+        let mut cloned_msg = self.clone();
+        cloned_msg.mtype = t;
+        cloned_msg
+    }
 
 }
